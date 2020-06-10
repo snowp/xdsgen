@@ -175,7 +175,7 @@ func (g *Generator) Finalize() error {
 	// See https://en.wikipedia.org/wiki/Topological_sorting#Depth-first_search. Potentially optimizations would be
 	// possible here but given initial use cases will be fairly small this seems like a reasonable starting point.
 	//
-	// The current encoding of the (hopefully) DSG has edges pointing to its dependencies, so a topo sort as is will
+	// The current encoding of the (hopefully a) DAG has edges pointing to its dependencies, so a topo sort as is will
 	// result in computing the semantically reverse order: the order of processing if the outputs have to be processed
 	// before the inputs. Instead, we reverse the graph by constructing an adjacency map. We want the *reverse postordering*
 	// of this traversal.
@@ -202,20 +202,11 @@ func (g *Generator) Finalize() error {
 		}
 	}
 
-	// With the adjacency matrix we can start performing the DFS.
-	// Keep track of what we've seen to avoid cycles.
 	for key, value := range directInputDependencies {
-
-		exclusions := map[string]struct{}{}
-		for k := range g.inputs {
-			if k != key {
-				exclusions[k] = struct{}{}
-			}
-		}
 		d := newDfs(g.pipelineStages, adjacency, func(stage *pipelineStage) {
+			// Append the entry to get the reverse traversal order.
 			g.topoOrderByInput[key] = append([]*pipelineStage{stage}, g.topoOrderByInput[key]...)
 		})
-		d.exclusions = exclusions
 		err := d.do(value)
 		if err != nil {
 			return err
@@ -228,7 +219,6 @@ func (g *Generator) Finalize() error {
 type dfs struct {
 	stages map[string]*pipelineStage
 	adjacency map[string][]string
-	exclusions map[string]struct{}
 
 	totalSeen map[*pipelineStage]struct{}
 	tempSeen map[*pipelineStage]struct{}
