@@ -16,15 +16,18 @@ type input struct {
 	latest interface{}
 }
 
+type stageDependency struct {
+	name  string
+	index int
+}
+
 type pipelineStage struct {
 	name     string
 	latest   interface{}
 	implType reflect.Type
 
-	// children of this stage - these should be evaluated whenever this pipeline stage is re-evaluated.
-	children []*pipelineStage
-	// list of stages that this stage depends on - essentially the list of values that should be injected into this stage
-	deps []string
+	// list of stages that this stage depends on
+	deps []stageDependency
 
 	// nil unless this is a terminal stage
 	outCh chan<- GeneratedOutput
@@ -36,9 +39,9 @@ type GeneratedOutput struct {
 }
 
 type Generator struct {
-	inputs                  map[string]*input
+	inputs           map[string]*input
 	topoOrderByInput map[string][]*pipelineStage
-	pipelineStages          map[string]*pipelineStage
+	pipelineStages   map[string]*pipelineStage
 
 	publishCh chan map[string]interface{}
 	Out       chan GeneratedOutput
@@ -65,7 +68,6 @@ func (g *Generator) updateStage(name string, value interface{}) (map[string]inte
 	for k, v := range g.pipelineStages {
 		snappedValues[k] = v.latest
 	}
-
 
 	return snappedValues, nil
 }
@@ -108,11 +110,11 @@ func (g *Generator) RegisterPipelineStage(name string, pipeline PipelineStage, t
 		out = g.Out
 	}
 
-	deps := []string{}
+	deps := []stageDependency{}
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if name, ok := f.Tag.Lookup("pipeline"); ok {
-			deps = append(deps, name)
+			deps = append(deps, stageDependency{name: name, index: i})
 		}
 	}
 
@@ -120,7 +122,7 @@ func (g *Generator) RegisterPipelineStage(name string, pipeline PipelineStage, t
 		name:     name,
 		outCh:    out,
 		implType: t,
-		deps: deps,
+		deps:     deps,
 	}
 
 	g.pipelineStages[name] = stage
@@ -132,24 +134,21 @@ func evaluatePipeline(stage *pipelineStage, values map[string]interface{}) (inte
 	p := reflect.New(stage.implType).Elem()
 
 	// TODO cache index mappings
-	for i := 0; i < stage.implType.NumField(); i++ {
-		f := stage.implType.Field(i)
-		if dep := f.Tag.Get("pipeline"); dep != "" {
-			f := p.Field(i)
+	for _, dep := range stage.deps {
+		f := p.Field(dep.index)
 
-			v, ok := values[dep]
-			if !ok {
-				// in this case one of our dependent values haven't been computed. Skip this one intentionally, we can rely on this object being created again if our dependencies end up being recomputed during this run
-				// TODO(snowp): We might need to require seeded values or do more thorough recinoytatuib
-				return nil, nil
-			}
-
-			if v == nil {
-				return nil, nil
-			}
-
-			f.Set(reflect.ValueOf(v))
+		v, ok := values[dep.name]
+		if !ok {
+			// TODO bubble this up somehow?
+			return nil, nil
 		}
+
+		if v == nil {
+			// TODO bubble this up somehow?
+			return nil, nil
+		}
+
+		f.Set(reflect.ValueOf(v))
 	}
 
 	pipeline, ok := p.Interface().(PipelineStage)
@@ -187,15 +186,15 @@ func (g *Generator) Finalize() error {
 	for _, stage := range g.pipelineStages {
 		for _, dep := range stage.deps {
 			// If the dependency is an input, add it to the direct input map instead of the adjacency matrix.
-			_, ok := g.inputs[dep]
+			_, ok := g.inputs[dep.name]
 			if ok {
-				directInputDependencies[dep] = append(directInputDependencies[dep], stage.name)
+				directInputDependencies[dep.name] = append(directInputDependencies[dep.name], stage.name)
 				continue
 			}
 
-			dependentStage, ok := g.pipelineStages[dep]
+			dependentStage, ok := g.pipelineStages[dep.name]
 			if !ok {
-				return fmt.Errorf("dependency on stage %s declared but stage is not defined", dep)
+				return fmt.Errorf("dependency on stage %s declared but stage is not defined", dep.name)
 			}
 
 			adjacency[dependentStage.name] = append(adjacency[dependentStage.name], stage.name)
@@ -217,12 +216,12 @@ func (g *Generator) Finalize() error {
 }
 
 type dfs struct {
-	stages map[string]*pipelineStage
+	stages    map[string]*pipelineStage
 	adjacency map[string][]string
 
 	totalSeen map[*pipelineStage]struct{}
-	tempSeen map[*pipelineStage]struct{}
-	addStage func(stage *pipelineStage)
+	tempSeen  map[*pipelineStage]struct{}
+	addStage  func(stage *pipelineStage)
 }
 
 func newDfs(stages map[string]*pipelineStage, adjacency map[string][]string, addStage func(stage *pipelineStage)) dfs {
@@ -230,7 +229,7 @@ func newDfs(stages map[string]*pipelineStage, adjacency map[string][]string, add
 		stages:    stages,
 		adjacency: adjacency,
 		totalSeen: map[*pipelineStage]struct{}{},
-		tempSeen: map[*pipelineStage]struct{}{},
+		tempSeen:  map[*pipelineStage]struct{}{},
 		addStage:  addStage,
 	}
 }
@@ -261,7 +260,7 @@ func (d *dfs) do(children []string) error {
 	return nil
 }
 
-	func (g *Generator) RegisterInput(name string) (chan<- interface{}, error) {
+func (g *Generator) RegisterInput(name string) (chan<- interface{}, error) {
 	if _, ok := g.inputs[name]; ok {
 		return nil, fmt.Errorf("cannt register same input multiple times")
 	}
