@@ -5,16 +5,28 @@ import (
 	"fmt"
 	"github.com/stretchr/testify/assert"
 	"testing"
+	"time"
 )
+
+type intermediatePipeline struct {
+	SomeInt int `pipeline:"a"`
+}
+
+func (i intermediatePipeline) Generate() interface{} {
+	return i.SomeInt * 2
+}
 
 type testPipeline struct {
 	SomeInt int `pipeline:"a"`
 	SomeString string `pipeline:"b"`
+	// TODO it would be great if we could auto wire this based on the type
+	Intermediate int `pipeline:"intermediate"`
 }
 
 func (t testPipeline) Generate() interface{} {
-	return fmt.Sprintf("int: %d, str: %s", t.SomeInt, t.SomeString)
+	return fmt.Sprintf("int: %d, int: %d, str: %s", t.SomeInt, t.Intermediate, t.SomeString)
 }
+
 func TestFramework(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -25,7 +37,12 @@ func TestFramework(t *testing.T) {
 	bInput, err := g.RegisterInput("b")
 	assert.NoError(t, err)
 
-	err = g.RegisterOutput("test", testPipeline{})
+	err = g.RegisterPipelineStage("test", testPipeline{}, true)
+	assert.NoError(t, err)
+
+	err = g.RegisterPipelineStage("intermediate", intermediatePipeline{}, false)
+
+	err = g.Finalize()
 	assert.NoError(t, err)
 
 	checkOutput := func() *GeneratedOutput {
@@ -44,23 +61,31 @@ func TestFramework(t *testing.T) {
 	assert.Nil(t, checkOutput())
 	bInput <- "f"
 
-	output := <- g.Out
-	assert.NotNil(t, output)
-	assert.Equal(t, output.Name, "test")
-	assert.Equal(t, output.Value, "int: 32, str: f")
+	timedGetOutput := func() *GeneratedOutput {
+		t.Helper()
+		select {
+		case o := <-g.Out:
+			return &o
+		case <- time.NewTimer(5 * time.Second).C:
+			t.Fatal("timed out")
+			return nil
+		}
+	}
 
-	go func() {
-		aInput <- 10
-		bInput <- "lala"
-	}()
-
-	output = <- g.Out
+	output := timedGetOutput()
 	assert.NotNil(t, output)
-	assert.Equal(t, output.Name, "test")
-	assert.Equal(t, output.Value, "int: 10, str: f")
+	assert.Equal(t, "test", output.Name)
+	assert.Equal(t, "int: 32, int: 64, str: f", output.Value)
 
-	output = <- g.Out
+	aInput <- 10
+	output = timedGetOutput()
 	assert.NotNil(t, output)
-	assert.Equal(t, output.Name, "test")
-	assert.Equal(t, output.Value, "int: 10, str: lala")
+	assert.Equal(t, "test", output.Name)
+	assert.Equal(t, "int: 10, int: 20, str: f", output.Value)
+
+	bInput <- "lala"
+	output = timedGetOutput()
+	assert.NotNil(t, output)
+	assert.Equal(t, "test", output.Name)
+	assert.Equal(t, "int: 10, int: 20, str: lala", output.Value)
 }
