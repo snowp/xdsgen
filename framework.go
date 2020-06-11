@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"sync"
 )
 
 type PipelineStage interface {
@@ -16,6 +15,12 @@ type input struct {
 	latest interface{}
 }
 
+type inputUpdate struct {
+	name string
+	val  interface{}
+}
+
+// name of a dependency + the field index of the stage impl that it should be injected into
 type stageDependency struct {
 	name  string
 	index int
@@ -33,8 +38,11 @@ type pipelineStage struct {
 	outCh chan<- GeneratedOutput
 }
 
+// GeneratedOutput wraps the output value for a terminating pipeline stage
 type GeneratedOutput struct {
-	Name  string
+	// Name is the name of the stage that generated this output
+	Name string
+	// Value is the generated value. Will never be nil
 	Value interface{}
 }
 
@@ -43,59 +51,14 @@ type Generator struct {
 	topoOrderByInput map[string][]*pipelineStage
 	pipelineStages   map[string]*pipelineStage
 
-	publishCh chan map[string]interface{}
-	Out       chan GeneratedOutput
-	ctx       context.Context
+	ctx context.Context
 
-	sync.Mutex
-}
-
-func (g *Generator) updateStage(name string, value interface{}) (map[string]interface{}, error) {
-	g.Lock()
-	defer g.Unlock()
-	stage, ok := g.pipelineStages[name]
-	if !ok {
-		return nil, fmt.Errorf("cannot update stage %s, not registered", name)
-	}
-
-	stage.latest = value
-
-	snappedValues := map[string]interface{}{}
-	for k, v := range g.inputs {
-		snappedValues[k] = v.latest
-	}
-
-	for k, v := range g.pipelineStages {
-		snappedValues[k] = v.latest
-	}
-
-	return snappedValues, nil
-}
-
-func (g *Generator) updateInput(name string, value interface{}) (map[string]interface{}, error) {
-	g.Lock()
-	defer g.Unlock()
-	input, ok := g.inputs[name]
-	if !ok {
-		return nil, fmt.Errorf("cannot update input %s, not registered", name)
-	}
-
-	input.latest = value
-
-	snappedValues := map[string]interface{}{}
-	for k, v := range g.inputs {
-		snappedValues[k] = v.latest
-	}
-
-	for k, v := range g.pipelineStages {
-		snappedValues[k] = v.latest
-	}
-
-	return snappedValues, nil
+	evalCh chan inputUpdate
+	Out    chan GeneratedOutput
 }
 
 func NewGenerator(ctx context.Context) Generator {
-	return Generator{ctx: ctx, Out: make(chan GeneratedOutput), inputs: map[string]*input{}, topoOrderByInput: map[string][]*pipelineStage{}, pipelineStages: map[string]*pipelineStage{}}
+	return Generator{ctx: ctx, Out: make(chan GeneratedOutput), evalCh: make(chan inputUpdate, 10), inputs: map[string]*input{}, topoOrderByInput: map[string][]*pipelineStage{}, pipelineStages: map[string]*pipelineStage{}}
 }
 
 func (g *Generator) RegisterPipelineStage(name string, pipeline PipelineStage, terminal bool) error {
@@ -160,8 +123,6 @@ func evaluatePipeline(stage *pipelineStage, values map[string]interface{}) (inte
 }
 
 func (g *Generator) Finalize() error {
-	g.Lock()
-	defer g.Unlock()
 	// At this point we know
 	//   1) all the inputs
 	//   2) each individual pipeline with its dependencies (parent nodes)
@@ -211,6 +172,47 @@ func (g *Generator) Finalize() error {
 			return err
 		}
 	}
+
+	go func() {
+		currentValues := map[string]interface{}{}
+		for {
+			select {
+			case v := <-g.evalCh:
+				currentValues[v.name] = v.val
+
+				stages := g.topoOrderByInput[v.name]
+
+				for _, s := range stages {
+					v, err := evaluatePipeline(s, currentValues)
+					if err != nil {
+						panic(err)
+					}
+
+					// If we returned nil we failed to DI all the values - we're not ready to construct this stage.
+					// This also means that we cannot safely proceed with further stage, so bail out now.
+					// TODO(snowp): We might need to require initial values? we'll see
+					if v == nil {
+						break
+					}
+
+					// update the snapped values to include the newly constructed value
+					currentValues[s.name] = v
+
+					if s.outCh != nil {
+						select {
+						case <-g.ctx.Done():
+						case s.outCh <- GeneratedOutput{
+							Value: v,
+							Name:  s.name,
+						}:
+						}
+					}
+				}
+			case <-g.ctx.Done():
+				return
+			}
+		}
+	}()
 
 	return nil
 }
@@ -273,43 +275,11 @@ func (g *Generator) RegisterInput(name string) (chan<- interface{}, error) {
 		for {
 			select {
 			case v := <-input.ch:
-				snappedValues, err := g.updateInput(name, v)
-				if err != nil {
-					panic(err)
-				}
+				select {
+				case g.evalCh <- inputUpdate{name: name, val: v}:
+				case <-g.ctx.Done():
+					return
 
-				g.Lock()
-				stages := g.topoOrderByInput[name]
-				g.Unlock()
-
-				for _, s := range stages {
-					v, err := evaluatePipeline(s, snappedValues)
-					if err != nil {
-						panic(err)
-					}
-
-					// If we returned nil we failed to DI all the values - we're not ready to construct this stage.
-					// This also means that we cannot safely proceed with further stage, so bail out now.
-					// TODO(snowp): We might need to require initial values? we'll see
-					if v == nil {
-						break
-					}
-
-					// update the snapped values to include the newly constructed value
-					snappedValues, err = g.updateStage(s.name, v)
-					if err != nil {
-						panic(err)
-					}
-
-					if s.outCh != nil {
-						select {
-						case <-g.ctx.Done():
-						case s.outCh <- GeneratedOutput{
-							Value: v,
-							Name:  s.name,
-						}:
-						}
-					}
 				}
 			case <-g.ctx.Done():
 				return
