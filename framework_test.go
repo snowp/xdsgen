@@ -17,7 +17,7 @@ func (i intermediatePipeline) Generate() interface{} {
 }
 
 type testPipeline struct {
-	SomeInt int `pipeline:"a"`
+	SomeInt    int    `pipeline:"a"`
 	SomeString string `pipeline:"b"`
 	// TODO it would be great if we could auto wire this based on the type
 	Intermediate int `pipeline:"intermediate"`
@@ -41,14 +41,15 @@ func TestFramework(t *testing.T) {
 	assert.NoError(t, err)
 
 	err = g.RegisterPipelineStage("intermediate", intermediatePipeline{}, false)
+	assert.NoError(t, err)
 
 	err = g.Finalize()
 	assert.NoError(t, err)
 
 	checkOutput := func() *GeneratedOutput {
 		select {
-		 case o := <-g.Out:
-		 	return &o
+		case o := <-g.Out:
+			return &o
 		default:
 			return nil
 		}
@@ -66,7 +67,7 @@ func TestFramework(t *testing.T) {
 		select {
 		case o := <-g.Out:
 			return &o
-		case <- time.NewTimer(5 * time.Second).C:
+		case <-time.NewTimer(5 * time.Second).C:
 			t.Fatal("timed out")
 			return nil
 		}

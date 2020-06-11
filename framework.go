@@ -10,11 +10,6 @@ type PipelineStage interface {
 	Generate() interface{}
 }
 
-type input struct {
-	ch     chan interface{}
-	latest interface{}
-}
-
 type inputUpdate struct {
 	name string
 	val  interface{}
@@ -28,7 +23,6 @@ type stageDependency struct {
 
 type pipelineStage struct {
 	name     string
-	latest   interface{}
 	implType reflect.Type
 
 	// list of stages that this stage depends on
@@ -47,7 +41,7 @@ type GeneratedOutput struct {
 }
 
 type Generator struct {
-	inputs           map[string]*input
+	inputs           map[string]struct{}
 	topoOrderByInput map[string][]*pipelineStage
 	pipelineStages   map[string]*pipelineStage
 
@@ -58,7 +52,7 @@ type Generator struct {
 }
 
 func NewGenerator(ctx context.Context) Generator {
-	return Generator{ctx: ctx, Out: make(chan GeneratedOutput), evalCh: make(chan inputUpdate, 10), inputs: map[string]*input{}, topoOrderByInput: map[string][]*pipelineStage{}, pipelineStages: map[string]*pipelineStage{}}
+	return Generator{ctx: ctx, Out: make(chan GeneratedOutput), evalCh: make(chan inputUpdate, 10), inputs: map[string]struct{}{}, topoOrderByInput: map[string][]*pipelineStage{}, pipelineStages: map[string]*pipelineStage{}}
 }
 
 func (g *Generator) RegisterPipelineStage(name string, pipeline PipelineStage, terminal bool) error {
@@ -217,6 +211,7 @@ func (g *Generator) Finalize() error {
 	return nil
 }
 
+// Helper type for managing DFS state
 type dfs struct {
 	stages    map[string]*pipelineStage
 	adjacency map[string][]string
@@ -267,14 +262,13 @@ func (g *Generator) RegisterInput(name string) (chan<- interface{}, error) {
 		return nil, fmt.Errorf("cannt register same input multiple times")
 	}
 
-	input := &input{
-		ch: make(chan interface{}),
-	}
+	g.inputs[name] = struct{}{}
+	inputCh := make(chan interface{})
 
 	go func() {
 		for {
 			select {
-			case v := <-input.ch:
+			case v := <-inputCh:
 				select {
 				case g.evalCh <- inputUpdate{name: name, val: v}:
 				case <-g.ctx.Done():
@@ -287,7 +281,5 @@ func (g *Generator) RegisterInput(name string) (chan<- interface{}, error) {
 		}
 	}()
 
-	g.inputs[name] = input
-
-	return input.ch, nil
+	return inputCh, nil
 }
