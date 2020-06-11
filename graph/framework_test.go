@@ -1,4 +1,4 @@
-package xdsgen
+package graph
 
 import (
 	"context"
@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+
+// Two inputs, a & b, with an intermediate node:
+// +--------+               +--------+
+// |        |               |        |
+// |   a    |               |   b    |
+// |        |               |        |
+// +--------+-+             +---+----+
+// |          |                 |
+// |          |                 |
+// |          |                 |
+// |      +---v---+             |
+// |      |       |             |
+// |   +--+  int  |             |
+// |   |  |       |             |
+// |   |  +-------+             |
+// |   |                        |
+// |   |                        |
+// | +-v----+                   |
+// | |      |                   |
+// +>+ test +<------------------+
+//   |      |
+//   +------+
 type intermediatePipeline struct {
 	SomeInt int `pipeline:"a"`
 }
@@ -19,7 +41,6 @@ func (i intermediatePipeline) Generate() interface{} {
 type testPipeline struct {
 	SomeInt    int    `pipeline:"a"`
 	SomeString string `pipeline:"b"`
-	// TODO it would be great if we could auto wire this based on the type
 	Intermediate int `pipeline:"intermediate"`
 }
 

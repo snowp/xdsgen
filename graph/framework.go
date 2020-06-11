@@ -1,4 +1,4 @@
-package xdsgen
+package graph
 
 import (
 	"context"
